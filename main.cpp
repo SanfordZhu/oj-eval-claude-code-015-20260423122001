@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstring>
 #include <cstdint>
+#include <sys/stat.h>
 
 const int NUM_BUCKETS = 20;
 const std::string DATA_DIR = "data";
@@ -27,9 +28,9 @@ std::string getBucketFilename(int bucket) {
 }
 
 void ensureDataDir() {
-    std::ifstream test(DATA_DIR + "/test");
-    if (!test.good()) {
-        std::system("mkdir -p data");
+    struct stat st;
+    if (stat(DATA_DIR.c_str(), &st) != 0) {
+        mkdir(DATA_DIR.c_str(), 0755);
     }
 }
 
