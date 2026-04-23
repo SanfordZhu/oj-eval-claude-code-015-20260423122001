@@ -4,6 +4,7 @@
 #include <vector>
 #include <algorithm>
 #include <cstring>
+#include <cstdint>
 
 const int NUM_BUCKETS = 20;
 const std::string DATA_DIR = "data";
