@@ -6,6 +6,7 @@
 #include <cstring>
 #include <cstdint>
 #include <sys/stat.h>
+#include <unordered_map>
 
 const int NUM_BUCKETS = 20;
 const std::string DATA_DIR = "data";
@@ -14,6 +15,9 @@ struct Entry {
     std::string index;
     std::vector<int> values;
 };
+
+std::vector<Entry> bucketCache[NUM_BUCKETS];
+bool cacheDirty[NUM_BUCKETS] = {false};
 
 unsigned int hashIndex(const std::string& s) {
     unsigned int h = 0;
@@ -34,12 +38,14 @@ void ensureDataDir() {
     }
 }
 
-std::vector<Entry> loadBucket(int bucket) {
-    std::vector<Entry> entries;
+void loadBucket(int bucket) {
+    if (!bucketCache[bucket].empty()) {
+        return;
+    }
     std::string filename = getBucketFilename(bucket);
     std::ifstream infile(filename, std::ios::binary);
     if (!infile.is_open()) {
-        return entries;
+        return;
     }
 
     while (infile.peek() != EOF) {
@@ -65,20 +71,22 @@ std::vector<Entry> loadBucket(int bucket) {
         }
         if (values.empty()) break;
 
-        entries.push_back({index, values});
+        bucketCache[bucket].push_back({index, values});
     }
     infile.close();
-    return entries;
 }
 
-void saveBucket(int bucket, const std::vector<Entry>& entries) {
+void saveBucket(int bucket) {
+    if (!cacheDirty[bucket]) {
+        return;
+    }
     std::string filename = getBucketFilename(bucket);
     std::ofstream outfile(filename, std::ios::binary);
     if (!outfile.is_open()) {
         return;
     }
 
-    for (const auto& entry : entries) {
+    for (const auto& entry : bucketCache[bucket]) {
         uint16_t index_len = static_cast<uint16_t>(entry.index.size());
         outfile.write(reinterpret_cast<const char*>(&index_len), sizeof(index_len));
         outfile.write(entry.index.data(), index_len);
@@ -92,56 +100,63 @@ void saveBucket(int bucket, const std::vector<Entry>& entries) {
         }
     }
     outfile.close();
+    cacheDirty[bucket] = false;
+}
+
+void flushAllBuckets() {
+    for (int i = 0; i < NUM_BUCKETS; i++) {
+        saveBucket(i);
+    }
 }
 
 void insert(const std::string& index, int value) {
     ensureDataDir();
     int bucket = hashIndex(index);
-    auto entries = loadBucket(bucket);
+    loadBucket(bucket);
 
-    auto it = std::find_if(entries.begin(), entries.end(),
+    auto it = std::find_if(bucketCache[bucket].begin(), bucketCache[bucket].end(),
         [&index](const Entry& e) { return e.index == index; });
 
-    if (it != entries.end()) {
+    if (it != bucketCache[bucket].end()) {
         auto vit = std::lower_bound(it->values.begin(), it->values.end(), value);
         if (vit == it->values.end() || *vit != value) {
             it->values.insert(vit, value);
         }
     } else {
-        entries.push_back({index, {value}});
+        bucketCache[bucket].push_back({index, {value}});
     }
 
-    saveBucket(bucket, entries);
+    cacheDirty[bucket] = true;
 }
 
 void remove(const std::string& index, int value) {
     int bucket = hashIndex(index);
-    auto entries = loadBucket(bucket);
+    loadBucket(bucket);
 
-    auto it = std::find_if(entries.begin(), entries.end(),
+    auto it = std::find_if(bucketCache[bucket].begin(), bucketCache[bucket].end(),
         [&index](const Entry& e) { return e.index == index; });
 
-    if (it != entries.end()) {
+    if (it != bucketCache[bucket].end()) {
         auto vit = std::lower_bound(it->values.begin(), it->values.end(), value);
         if (vit != it->values.end() && *vit == value) {
             it->values.erase(vit);
         }
         if (it->values.empty()) {
-            entries.erase(it);
+            bucketCache[bucket].erase(it);
         }
     }
 
-    saveBucket(bucket, entries);
+    cacheDirty[bucket] = true;
 }
 
 void find(const std::string& index) {
     int bucket = hashIndex(index);
-    auto entries = loadBucket(bucket);
+    loadBucket(bucket);
 
-    auto it = std::find_if(entries.begin(), entries.end(),
+    auto it = std::find_if(bucketCache[bucket].begin(), bucketCache[bucket].end(),
         [&index](const Entry& e) { return e.index == index; });
 
-    if (it == entries.end() || it->values.empty()) {
+    if (it == bucketCache[bucket].end() || it->values.empty()) {
         std::cout << "null" << std::endl;
     } else {
         for (size_t i = 0; i < it->values.size(); i++) {
@@ -179,6 +194,8 @@ int main() {
             find(index);
         }
     }
+
+    flushAllBuckets();
 
     return 0;
 }
