@@ -6,18 +6,9 @@
 #include <cstring>
 #include <cstdint>
 #include <sys/stat.h>
-#include <unordered_map>
 
 const int NUM_BUCKETS = 20;
 const std::string DATA_DIR = "data";
-
-struct Entry {
-    std::string index;
-    std::vector<int> values;
-};
-
-std::vector<Entry> bucketCache[NUM_BUCKETS];
-bool cacheDirty[NUM_BUCKETS] = {false};
 
 unsigned int hashIndex(const std::string& s) {
     unsigned int h = 0;
@@ -38,14 +29,12 @@ void ensureDataDir() {
     }
 }
 
-void loadBucket(int bucket) {
-    if (!bucketCache[bucket].empty()) {
-        return;
-    }
+std::vector<int> loadValues(int bucket, const std::string& target_index) {
+    std::vector<int> result;
     std::string filename = getBucketFilename(bucket);
     std::ifstream infile(filename, std::ios::binary);
     if (!infile.is_open()) {
-        return;
+        return result;
     }
 
     while (infile.peek() != EOF) {
@@ -53,115 +42,148 @@ void loadBucket(int bucket) {
         if (!infile.read(reinterpret_cast<char*>(&index_len), sizeof(index_len))) break;
         if (index_len > 100) break;
 
-        std::string index(index_len, '\0');
-        if (!infile.read(&index[0], index_len)) break;
+        std::string index_str(index_len, '\0');
+        if (!infile.read(&index_str[0], index_len)) break;
 
         uint32_t value_count;
         if (!infile.read(reinterpret_cast<char*>(&value_count), sizeof(value_count))) break;
         if (value_count > 100000) break;
 
-        std::vector<int> values(value_count);
-        for (uint32_t i = 0; i < value_count; i++) {
-            int32_t v;
-            if (!infile.read(reinterpret_cast<char*>(&v), sizeof(v))) {
-                values.clear();
-                break;
+        if (index_str == target_index) {
+            result.resize(value_count);
+            for (uint32_t i = 0; i < value_count; i++) {
+                int32_t v;
+                if (!infile.read(reinterpret_cast<char*>(&v), sizeof(v))) {
+                    result.clear();
+                    infile.close();
+                    return result;
+                }
+                result[i] = v;
             }
-            values[i] = v;
+            infile.close();
+            return result;
         }
-        if (values.empty()) break;
 
-        bucketCache[bucket].push_back({index, values});
+        infile.seekg(value_count * sizeof(int32_t), std::ios::cur);
     }
     infile.close();
+    return result;
 }
 
-void saveBucket(int bucket) {
-    if (!cacheDirty[bucket]) {
-        return;
-    }
+void updateEntry(int bucket, const std::string& target_index, const std::vector<int>& new_values) {
     std::string filename = getBucketFilename(bucket);
-    std::ofstream outfile(filename, std::ios::binary);
-    if (!outfile.is_open()) {
-        return;
+    std::ifstream infile(filename, std::ios::binary);
+
+    std::string temp_filename = filename + ".tmp";
+    std::ofstream outfile(temp_filename, std::ios::binary);
+
+    bool found = false;
+    bool file_existed = infile.is_open();
+
+    if (file_existed) {
+        while (infile.peek() != EOF) {
+            uint16_t index_len;
+            if (!infile.read(reinterpret_cast<char*>(&index_len), sizeof(index_len))) break;
+            if (index_len > 100) break;
+
+            std::string index_str(index_len, '\0');
+            if (!infile.read(&index_str[0], index_len)) break;
+
+            uint32_t value_count;
+            if (!infile.read(reinterpret_cast<char*>(&value_count), sizeof(value_count))) break;
+            if (value_count > 100000) break;
+
+            if (index_str == target_index) {
+                found = true;
+                if (!new_values.empty()) {
+                    uint16_t new_index_len = static_cast<uint16_t>(target_index.size());
+                    outfile.write(reinterpret_cast<const char*>(&new_index_len), sizeof(new_index_len));
+                    outfile.write(target_index.data(), new_index_len);
+
+                    uint32_t new_value_count = static_cast<uint32_t>(new_values.size());
+                    outfile.write(reinterpret_cast<const char*>(&new_value_count), sizeof(new_value_count));
+
+                    for (int v : new_values) {
+                        int32_t iv = v;
+                        outfile.write(reinterpret_cast<const char*>(&iv), sizeof(iv));
+                    }
+                }
+            } else {
+                uint16_t out_index_len = index_len;
+                outfile.write(reinterpret_cast<const char*>(&out_index_len), sizeof(out_index_len));
+                outfile.write(index_str.data(), index_len);
+
+                uint32_t out_value_count = value_count;
+                outfile.write(reinterpret_cast<const char*>(&out_value_count), sizeof(out_value_count));
+
+                char buffer[4096];
+                uint32_t remaining = value_count * sizeof(int32_t);
+                while (remaining > 0) {
+                    uint32_t to_read = std::min(remaining, (uint32_t)sizeof(buffer));
+                    if (!infile.read(buffer, to_read)) break;
+                    outfile.write(buffer, to_read);
+                    remaining -= to_read;
+                }
+            }
+        }
+        infile.close();
     }
 
-    for (const auto& entry : bucketCache[bucket]) {
-        uint16_t index_len = static_cast<uint16_t>(entry.index.size());
+    if (!new_values.empty() && !found) {
+        uint16_t index_len = static_cast<uint16_t>(target_index.size());
         outfile.write(reinterpret_cast<const char*>(&index_len), sizeof(index_len));
-        outfile.write(entry.index.data(), index_len);
+        outfile.write(target_index.data(), index_len);
 
-        uint32_t value_count = static_cast<uint32_t>(entry.values.size());
+        uint32_t value_count = static_cast<uint32_t>(new_values.size());
         outfile.write(reinterpret_cast<const char*>(&value_count), sizeof(value_count));
 
-        for (int v : entry.values) {
+        for (int v : new_values) {
             int32_t iv = v;
             outfile.write(reinterpret_cast<const char*>(&iv), sizeof(iv));
         }
     }
-    outfile.close();
-    cacheDirty[bucket] = false;
-}
 
-void flushAllBuckets() {
-    for (int i = 0; i < NUM_BUCKETS; i++) {
-        saveBucket(i);
-    }
+    outfile.close();
+
+    std::remove(filename.c_str());
+    std::rename(temp_filename.c_str(), filename.c_str());
 }
 
 void insert(const std::string& index, int value) {
     ensureDataDir();
     int bucket = hashIndex(index);
-    loadBucket(bucket);
+    auto values = loadValues(bucket, index);
 
-    auto it = std::find_if(bucketCache[bucket].begin(), bucketCache[bucket].end(),
-        [&index](const Entry& e) { return e.index == index; });
-
-    if (it != bucketCache[bucket].end()) {
-        auto vit = std::lower_bound(it->values.begin(), it->values.end(), value);
-        if (vit == it->values.end() || *vit != value) {
-            it->values.insert(vit, value);
-        }
-    } else {
-        bucketCache[bucket].push_back({index, {value}});
+    auto it = std::lower_bound(values.begin(), values.end(), value);
+    if (it == values.end() || *it != value) {
+        values.insert(it, value);
     }
 
-    cacheDirty[bucket] = true;
+    updateEntry(bucket, index, values);
 }
 
 void remove(const std::string& index, int value) {
     int bucket = hashIndex(index);
-    loadBucket(bucket);
+    auto values = loadValues(bucket, index);
 
-    auto it = std::find_if(bucketCache[bucket].begin(), bucketCache[bucket].end(),
-        [&index](const Entry& e) { return e.index == index; });
-
-    if (it != bucketCache[bucket].end()) {
-        auto vit = std::lower_bound(it->values.begin(), it->values.end(), value);
-        if (vit != it->values.end() && *vit == value) {
-            it->values.erase(vit);
-        }
-        if (it->values.empty()) {
-            bucketCache[bucket].erase(it);
-        }
+    auto it = std::lower_bound(values.begin(), values.end(), value);
+    if (it != values.end() && *it == value) {
+        values.erase(it);
     }
 
-    cacheDirty[bucket] = true;
+    updateEntry(bucket, index, values);
 }
 
 void find(const std::string& index) {
     int bucket = hashIndex(index);
-    loadBucket(bucket);
+    auto values = loadValues(bucket, index);
 
-    auto it = std::find_if(bucketCache[bucket].begin(), bucketCache[bucket].end(),
-        [&index](const Entry& e) { return e.index == index; });
-
-    if (it == bucketCache[bucket].end() || it->values.empty()) {
+    if (values.empty()) {
         std::cout << "null" << std::endl;
     } else {
-        for (size_t i = 0; i < it->values.size(); i++) {
+        for (size_t i = 0; i < values.size(); i++) {
             if (i > 0) std::cout << " ";
-            std::cout << it->values[i];
+            std::cout << values[i];
         }
         std::cout << std::endl;
     }
@@ -194,8 +216,6 @@ int main() {
             find(index);
         }
     }
-
-    flushAllBuckets();
 
     return 0;
 }
