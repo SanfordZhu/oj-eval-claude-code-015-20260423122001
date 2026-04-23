@@ -1,10 +1,10 @@
 #include <iostream>
 #include <fstream>
+#include <sstream>
 #include <string>
 #include <vector>
 #include <algorithm>
 #include <cstring>
-#include <cstdint>
 #include <sys/stat.h>
 
 const int NUM_BUCKETS = 20;
@@ -19,7 +19,7 @@ unsigned int hashIndex(const std::string& s) {
 }
 
 std::string getBucketFilename(int bucket) {
-    return DATA_DIR + "/bucket" + std::to_string(bucket) + ".dat";
+    return DATA_DIR + "/bucket" + std::to_string(bucket) + ".txt";
 }
 
 void ensureDataDir() {
@@ -32,41 +32,26 @@ void ensureDataDir() {
 std::vector<int> loadValues(int bucket, const std::string& target_index) {
     std::vector<int> result;
     std::string filename = getBucketFilename(bucket);
-    std::ifstream infile(filename, std::ios::binary);
+    std::ifstream infile(filename);
     if (!infile.is_open()) {
         return result;
     }
 
-    while (infile.peek() != EOF) {
-        uint16_t index_len;
-        if (!infile.read(reinterpret_cast<char*>(&index_len), sizeof(index_len))) break;
-        if (index_len > 100) break;
-
-        std::string index_str(index_len, '\0');
-        if (!infile.read(&index_str[0], index_len)) break;
-
-        uint32_t value_count;
-        if (!infile.read(reinterpret_cast<char*>(&value_count), sizeof(value_count))) break;
-        if (value_count > 100000) break;
-
-        if (index_str == target_index) {
-            result.resize(value_count);
-            for (uint32_t i = 0; i < value_count; i++) {
-                int32_t v;
-                if (!infile.read(reinterpret_cast<char*>(&v), sizeof(v))) {
-                    result.clear();
-                    infile.close();
-                    return result;
-                }
-                result[i] = v;
+    std::string line;
+    while (std::getline(infile, line)) {
+        if (line.empty()) continue;
+        size_t space_pos = line.find(' ');
+        if (space_pos == std::string::npos) continue;
+        std::string index = line.substr(0, space_pos);
+        if (index == target_index) {
+            std::string values_str = line.substr(space_pos + 1);
+            std::istringstream iss(values_str);
+            int v;
+            while (iss >> v) {
+                result.push_back(v);
             }
             infile.close();
             return result;
-        }
-
-        int32_t v;
-        for (uint32_t i = 0; i < value_count; i++) {
-            if (!infile.read(reinterpret_cast<char*>(&v), sizeof(v))) break;
         }
     }
     infile.close();
@@ -75,72 +60,46 @@ std::vector<int> loadValues(int bucket, const std::string& target_index) {
 
 void updateEntry(int bucket, const std::string& target_index, const std::vector<int>& new_values) {
     std::string filename = getBucketFilename(bucket);
-    std::ifstream infile(filename, std::ios::binary);
+    std::ifstream infile(filename);
 
     std::string temp_filename = filename + ".tmp";
-    std::ofstream outfile(temp_filename, std::ios::binary);
+    std::ofstream outfile(temp_filename);
 
     bool found = false;
     bool file_existed = infile.is_open();
 
     if (file_existed) {
-        while (infile.peek() != EOF) {
-            uint16_t index_len;
-            if (!infile.read(reinterpret_cast<char*>(&index_len), sizeof(index_len))) break;
-            if (index_len > 100) break;
-
-            std::string index_str(index_len, '\0');
-            if (!infile.read(&index_str[0], index_len)) break;
-
-            uint32_t value_count;
-            if (!infile.read(reinterpret_cast<char*>(&value_count), sizeof(value_count))) break;
-            if (value_count > 100000) break;
-
-            if (index_str == target_index) {
+        std::string line;
+        while (std::getline(infile, line)) {
+            if (line.empty()) continue;
+            size_t space_pos = line.find(' ');
+            if (space_pos == std::string::npos) {
+                outfile << line << "\n";
+                continue;
+            }
+            std::string index = line.substr(0, space_pos);
+            if (index == target_index) {
                 found = true;
                 if (!new_values.empty()) {
-                    uint16_t new_index_len = static_cast<uint16_t>(target_index.size());
-                    outfile.write(reinterpret_cast<const char*>(&new_index_len), sizeof(new_index_len));
-                    outfile.write(target_index.data(), new_index_len);
-
-                    uint32_t new_value_count = static_cast<uint32_t>(new_values.size());
-                    outfile.write(reinterpret_cast<const char*>(&new_value_count), sizeof(new_value_count));
-
+                    outfile << target_index;
                     for (int v : new_values) {
-                        int32_t iv = v;
-                        outfile.write(reinterpret_cast<const char*>(&iv), sizeof(iv));
+                        outfile << " " << v;
                     }
+                    outfile << "\n";
                 }
             } else {
-                uint16_t out_index_len = index_len;
-                outfile.write(reinterpret_cast<const char*>(&out_index_len), sizeof(out_index_len));
-                outfile.write(index_str.data(), index_len);
-
-                uint32_t out_value_count = value_count;
-                outfile.write(reinterpret_cast<const char*>(&out_value_count), sizeof(out_value_count));
-
-                int32_t v;
-                for (uint32_t i = 0; i < value_count; i++) {
-                    if (!infile.read(reinterpret_cast<char*>(&v), sizeof(v))) break;
-                    outfile.write(reinterpret_cast<const char*>(&v), sizeof(v));
-                }
+                outfile << line << "\n";
             }
         }
         infile.close();
     }
 
     if (!new_values.empty() && !found) {
-        uint16_t index_len = static_cast<uint16_t>(target_index.size());
-        outfile.write(reinterpret_cast<const char*>(&index_len), sizeof(index_len));
-        outfile.write(target_index.data(), index_len);
-
-        uint32_t value_count = static_cast<uint32_t>(new_values.size());
-        outfile.write(reinterpret_cast<const char*>(&value_count), sizeof(value_count));
-
+        outfile << target_index;
         for (int v : new_values) {
-            int32_t iv = v;
-            outfile.write(reinterpret_cast<const char*>(&iv), sizeof(iv));
+            outfile << " " << v;
         }
+        outfile << "\n";
     }
 
     outfile.close();
