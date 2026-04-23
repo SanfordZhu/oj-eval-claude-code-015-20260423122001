@@ -64,7 +64,10 @@ std::vector<int> loadValues(int bucket, const std::string& target_index) {
             return result;
         }
 
-        infile.seekg(value_count * sizeof(int32_t), std::ios::cur);
+        int32_t v;
+        for (uint32_t i = 0; i < value_count; i++) {
+            if (!infile.read(reinterpret_cast<char*>(&v), sizeof(v))) break;
+        }
     }
     infile.close();
     return result;
@@ -116,13 +119,10 @@ void updateEntry(int bucket, const std::string& target_index, const std::vector<
                 uint32_t out_value_count = value_count;
                 outfile.write(reinterpret_cast<const char*>(&out_value_count), sizeof(out_value_count));
 
-                char buffer[4096];
-                uint32_t remaining = value_count * sizeof(int32_t);
-                while (remaining > 0) {
-                    uint32_t to_read = std::min(remaining, (uint32_t)sizeof(buffer));
-                    if (!infile.read(buffer, to_read)) break;
-                    outfile.write(buffer, to_read);
-                    remaining -= to_read;
+                int32_t v;
+                for (uint32_t i = 0; i < value_count; i++) {
+                    if (!infile.read(reinterpret_cast<char*>(&v), sizeof(v))) break;
+                    outfile.write(reinterpret_cast<const char*>(&v), sizeof(v));
                 }
             }
         }
